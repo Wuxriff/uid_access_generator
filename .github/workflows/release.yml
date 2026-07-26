@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version without the v prefix, e.g. 0.1.0'
+        required: true
+        type: string
+      prerelease:
+        description: 'Mark as pre-release'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Guard branch
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "::error::releases may only be cut from main, got $REF"
+            exit 1
+          fi
+
+      - name: Validate version format
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! printf '%s' "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::version must look like 1.2.3 or 1.2.3-rc.1, got '$VERSION'"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check version against plugin.cfg
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          cfg_version=$(grep -oP '^version="\K[^"]+' addons/uid_access_generator/plugin.cfg)
+          if [ "$cfg_version" != "$VERSION" ]; then
+            echo "::error::plugin.cfg has $cfg_version but the workflow input was $VERSION"
+            exit 1
+          fi
+
+      - name: Check tag is free
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "::error::tag v$VERSION already exists"
+            exit 1
+          fi
+
+      - name: Build archive
+        env:
+          VERSION: ${{ inputs.version }}
+        run: zip -r "uid_access_generator-v$VERSION.zip" addons/uid_access_generator
+
+      - name: Push tag
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a "v$VERSION" -m "v$VERSION"
+          git push origin "v$VERSION"
+
+      - name: Create release
+        env:
+          VERSION: ${{ inputs.version }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          flags=""
+          if [ "$PRERELEASE" = "true" ]; then
+            flags="--prerelease"
+          fi
+          gh release create "v$VERSION" "uid_access_generator-v$VERSION.zip" \
+            --title "v$VERSION" --generate-notes $flags
